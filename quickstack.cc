@@ -27,6 +27,8 @@ int frame_check = 0;
 int flush_log = 3;
 int timeout_seconds = 600;
 bool lock_all = false;
+int numer_of_probes = 1;
+int usleep_value = 0;
 
 const char *debug_dir = "/usr/lib/debug";
 int *_attach_started = 0;
@@ -1183,7 +1185,6 @@ void dump_stack(const vector < int >&pids)
   uint trace_length = 1000;
   symbol_table_map *stmap = new symbol_table_map();
   proc_info *pinfos = new proc_info[pids.size()];
-  vector < ulong > *vals_sps = new vector < ulong >[pids.size()];
   user_regs_struct *regs = new user_regs_struct[pids.size()];
   bool *fails = new bool[pids.size()];
 
@@ -1204,29 +1205,34 @@ void dump_stack(const vector < int >&pids)
   }
   DBG(1, "Gathering stack traces..");
   *_attach_started = 1;
+  for (int i = 0; i != numer_of_probes; ++i) {
+    vector < ulong > *vals_sps = new vector < ulong >[pids.size()];
 
-  if (lock_all)
-    attach_and_dump_lock_all(pids, pinfos, vals_sps, regs, fails);
-  else
-    attach_and_dump_all(pids, pinfos, vals_sps, regs, fails, false);
+    if (lock_all)
+      attach_and_dump_lock_all(pids, pinfos, vals_sps, regs, fails);
+    else
+      attach_and_dump_all(pids, pinfos, vals_sps, regs, fails, false);
 
-  DBG(1, "Printing stack traces..");
-  print_trace_report(pinfos, pids);
+    DBG(1, "Printing stack traces..");
+    print_trace_report(pinfos, pids);
 
-  if (stack_out) {
-    stack_out_fp = fopen(stack_out, "w");
-  }
-
-  for (size_t i = 0; i < pids.size(); ++i) {
-    if (fails[i] == false) {
-      if (single_line) {
-	print_stack("%d  ", pids[i]);
-      } else {
-	print_stack("\nThread %ld (LWP %d):\n", pids.size() - i, pids[i]);
-      }
-      parse_stack_trace(pids[i], pinfos[i],
-			regs[i], vals_sps[i], trace_length);
+    if (stack_out) {
+      stack_out_fp = fopen(stack_out, "w");
     }
+
+    for (size_t i = 0; i < pids.size(); ++i) {
+      if (fails[i] == false) {
+        if (single_line) {
+           print_stack("%d  ", pids[i]);
+        } else {
+           print_stack("\nThread %ld (LWP %d):\n", pids.size() - i, pids[i]);
+        }
+        parse_stack_trace(pids[i], pinfos[i],
+        regs[i], vals_sps[i], trace_length);
+      }
+    }
+    delete[]vals_sps;
+    usleep(usleep_value);
   }
   if (stack_out_fp) {
     fclose(stack_out_fp);
@@ -1234,7 +1240,6 @@ void dump_stack(const vector < int >&pids)
   }
   delete[]fails;
   delete[]pinfos;
-  delete[]vals_sps;
   delete[]regs;
   delete stmap;
 }
@@ -1248,6 +1253,8 @@ struct option long_options[] = {
   {"debug", required_argument, 0, 'd'},
   {"debug_print_time_level", required_argument, 0, 't'},
   {"pid", required_argument, 0, 'p'},
+  {"number_of_probes", required_argument, 0, 'n'},
+  {"usleep", required_argument, 0, 'u'},
   {"single_line", no_argument, 0, 's'},
   {"calls", required_argument, 0, 'c'},
   {"frame_check", no_argument, 0, 'f'},
@@ -1280,6 +1287,8 @@ static void usage_exit()
   printf("Options (short name):\n");
   printf(" -p, --pid=N                    :Target process id\n");
   printf(" -d, --debug=N                  :Debug level\n");
+  printf(" -n, --number_of_probes=N       :Number of probes\n");
+  printf(" -u, --usleep=N                 :Sleep between probes, in microseconds\n");
   printf
       (" -s, --single_line              :Printing call stack info into one line per process, instead of gdb-like output\n");
   printf
@@ -1297,7 +1306,7 @@ static void usage_exit()
   printf
       (" -w, --flush_log=N              :Flushing every log output if log level is equal or under N\n");
   printf
-      (" -k, --timeout_seconds=N        :Terminates quickstack if exceeding N seconds. Default is 600 seconds\n");
+      (" -k, --timeout_seconds=N        :Terminates quickstack if exceeding N seconds times number_of_probes. Default N is 600 seconds\n");
   printf
       (" -l, --lock_all                 :Locking main process (given by --pid) during parsing all other processes. This will lock the whole process during taking all stack traces, so stall time is slightly increased, but will give more accurate results.\n");
   exit(1);
@@ -1306,7 +1315,7 @@ static void usage_exit()
 static void get_options(int argc, char **argv)
 {
   int c, opt_ind = 0;
-  while ((c = getopt_long(argc, argv, "?absflvw:k:d:c:t:p:o:",
+  while ((c = getopt_long(argc, argv, "?absflvw:k:d:c:t:p:n:u:o:",
 			  long_options, &opt_ind)) != EOF) {
     switch (c) {
     case '?':
@@ -1332,6 +1341,12 @@ static void get_options(int argc, char **argv)
       break;
     case 'p':
       target_pid = atoi(optarg);
+      break;
+    case 'u':
+      usleep_value = atoi(optarg);
+      break;
+    case 'n':
+      numer_of_probes = atoi(optarg);
       break;
     case 's':
       single_line = 1;
@@ -1454,7 +1469,7 @@ int main(int argc, char **argv)
       /* quickstack is running */
       sleep(1);
       gettimeofday(&t_current, 0);
-      if (t_current.tv_sec >= t_begin.tv_sec + timeout_seconds) {
+      if (t_current.tv_sec >= t_begin.tv_sec + timeout_seconds * numer_of_probes) {
 	DBG(1, "Timeout %d seconds reached. Killing quickstack..",
 	    timeout_seconds);
 	kill(quickstack_core_pid, SIGKILL);
